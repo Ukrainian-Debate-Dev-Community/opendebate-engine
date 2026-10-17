@@ -4,6 +4,7 @@ const {
   User,
   Team,
   TeamMember,
+  Room,
   RoomAdjudicator,
   sequelize,
 } = require("../models");
@@ -269,9 +270,11 @@ const removeParticipant = async (req, res, next) => {
 
     // refuse removal while the participant is still attached to debate
     // state — pulling them out from under a team/room would orphan scores
-    // and leave teams short-handed mid-round.
+    // and leave teams short-handed mid-round. Archived teams and rooms
+    // (a deleted draw) no longer count: the paranoid include skips them.
     const onTeam = await TeamMember.findOne({
       where: { participant_id: participantId },
+      include: [{ model: Team, required: true, attributes: [] }],
     });
     if (onTeam) {
       throw new AppError(
@@ -282,6 +285,7 @@ const removeParticipant = async (req, res, next) => {
 
     const isAdjudicator = await RoomAdjudicator.findOne({
       where: { participant_id: participantId },
+      include: [{ model: Room, required: true, attributes: [] }],
     });
     if (isAdjudicator) {
       throw new AppError(

@@ -405,6 +405,53 @@ describe("Event Participant API Endpoints", () => {
       );
     });
 
+    it("should allow removing a speaker whose only team is archived", async () => {
+      const speaker = await EventParticipant.create({
+        event_id: targetEventId,
+        display_name: "Archived Team Speaker",
+        role: "speaker",
+      });
+      const team = await Team.create({
+        event_id: targetEventId,
+        name: "Archived Team",
+      });
+      await TeamMember.create({ team_id: team.id, participant_id: speaker.id });
+      await team.destroy();
+
+      const res = await request(app)
+        .delete(`/api/events/${targetEventId}/participants/${speaker.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`);
+
+      expect(res.statusCode).toEqual(200);
+    });
+
+    it("should allow removing an adjudicator whose only room is archived", async () => {
+      const adjudicator = await EventParticipant.create({
+        event_id: targetEventId,
+        display_name: "Archived Room Chair",
+        role: "adjudicator",
+      });
+      const round = await Round.findOne({ where: { event_id: targetEventId } });
+      const format = await Format.findOne({ where: { code: "STD" } });
+      const room = await Room.create({
+        round_id: round.id,
+        format_id: format.id,
+        status: "pending",
+      });
+      await RoomAdjudicator.create({
+        room_id: room.id,
+        participant_id: adjudicator.id,
+        role: "chair",
+      });
+      await room.destroy();
+
+      const res = await request(app)
+        .delete(`/api/events/${targetEventId}/participants/${adjudicator.id}`)
+        .set("Authorization", `Bearer ${ownerToken}`);
+
+      expect(res.statusCode).toEqual(200);
+    });
+
     it("should return 403 if a random user attempts deletion", async () => {
       const res = await request(app)
         .delete(
