@@ -26,12 +26,12 @@
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1",
-    "express-rate-limit": "^8.5.2",
+    "dotenv": "^18.0.8",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "pg": "^8.13.3",
+    "pg": "^8.23.1",
     "pg-hstore": "^2.3.4",
     "sequelize": "^6.37.8",
     "sequelize-cli": "^6.6.5"
@@ -39,14 +39,14 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "cross-env": "^10.1.0",
-    "eslint": "^10.4.0",
-    "eslint-plugin-n": "^18.0.1",
+    "eslint": "^10.13.0",
+    "eslint-plugin-n": "^18.5.0",
     "eslint-plugin-promise": "^7.3.0",
-    "eslint-plugin-security": "^4.0.0",
-    "globals": "^17.6.0",
-    "jest": "^30.4.2",
+    "eslint-plugin-security": "^4.2.0",
+    "globals": "^17.13.0",
+    "jest": "^30.5.2",
     "nodemon": "^3.1.14",
-    "supertest": "^7.2.2"
+    "supertest": "^7.3.1"
   },
   "overrides": {
     "js-cookie": "^3.0.6",
