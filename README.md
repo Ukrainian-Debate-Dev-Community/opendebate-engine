@@ -1,6 +1,6 @@
-# Debate Management API
+# opendebate-engine
 
-RESTful API built with Node.js and Express to manage debate clubs, tournaments, dynamic matchmaking, and speaker statistics.
+The OpenDebate engine: a RESTful API built with Node.js and Express to manage debate clubs, tournaments, dynamic matchmaking, and speaker statistics.
 
 ## Features
 

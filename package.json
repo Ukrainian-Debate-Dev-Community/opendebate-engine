@@ -1,5 +1,5 @@
 {
-  "name": "debate-api",
+  "name": "opendebate-engine",
   "version": "1.3.1",
   "description": "Complex API for managing Debates",
   "main": "src/app.js",
@@ -11,7 +11,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DmytroTarasenk0/Debate-API.git"
+    "url": "git+https://github.com/Ukrainian-Debate-Dev-Community/opendebate-engine.git"
   },
   "keywords": [
     "api",
@@ -20,9 +20,9 @@
   "author": "DmytroTarasenk0",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/DmytroTarasenk0/Debate-API/issues"
+    "url": "https://github.com/Ukrainian-Debate-Dev-Community/opendebate-engine/issues"
   },
-  "homepage": "https://github.com/DmytroTarasenk0/Debate-API#readme",
+  "homepage": "https://github.com/Ukrainian-Debate-Dev-Community/opendebate-engine#readme",
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
