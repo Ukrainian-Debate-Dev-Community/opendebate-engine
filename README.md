@@ -52,6 +52,19 @@ The OpenDebate engine: a RESTful API built with Node.js and Express to manage de
    npm run dev
    ```
 
+## Make targets
+
+The same names as in the other opendebate repos:
+
+| Command | Does |
+|---|---|
+| `make setup` | `npm ci` |
+| `make test` / `make test-all` | the Jest suite; needs PostgreSQL and the `DB_*` and `JWT_*` settings from `.env` |
+| `make lint` / `make fmt` | ESLint / ESLint with `--fix` |
+| `make build` | the production image as `opendebate-engine:local` (Docker needed) |
+| `make clean` | remove test coverage output |
+| `make dev:run` (or `make dev`) | the API with reload on change (`npm run dev`) |
+
 ## Authentication
 
 The API utilises JSON Web Tokens (JWT) for stateless, secure authentication.
