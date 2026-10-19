@@ -130,8 +130,8 @@ describe("Iron speeches", () => {
 
   it("counts only the unmarked speech in the speaker standings", async () => {
     const iron = (await speakerStandings()).find((s) => s.id === ironId);
-    // rank 1 of 2 teams: multiplier 1.1, one speech of 80
-    expect(iron.total_points).toEqual(88);
+    // the iron speech (76) stays out: one speech of 80, no place bonus
+    expect(iron).toMatchObject({ total_points: 80, average_score: 80, speeches: 1 });
   });
 
   it("follows the ballot's mark, and the speaker stats follow it too", async () => {
@@ -139,7 +139,7 @@ describe("Iron speeches", () => {
     expect(res.statusCode).toEqual(200);
 
     const iron = (await speakerStandings()).find((s) => s.id === ironId);
-    expect(iron.total_points).toEqual(83.6);
+    expect(iron).toMatchObject({ total_points: 76, average_score: 76, speeches: 1 });
 
     const stats = await request(app)
       .get(`/api/events/${eventId}/stats/speakers`)
