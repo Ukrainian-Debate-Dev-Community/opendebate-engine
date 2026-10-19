@@ -3,9 +3,9 @@ name: Validate
 
 "on":
   pull_request:
-    branches: [main]
+    branches: [nightly, main]
   push:
-    branches: [main]
+    branches: [nightly, main]
 
 permissions:
   contents: read
