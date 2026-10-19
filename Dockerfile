@@ -14,7 +14,8 @@ RUN apk add --no-cache tini=0.19.0-r3
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --chown=node:node package.json package-lock.json .sequelizerc ./
 COPY --chown=node:node src ./src
-USER node
+# the image's "node" user, by number so any host can resolve it
+USER 1000:1000
 EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["node", "src/app.js"]
