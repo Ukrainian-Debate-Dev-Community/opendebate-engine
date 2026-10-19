@@ -272,7 +272,7 @@ describe("Standings API Endpoints", () => {
       expect(standings[1].total_points).toBe(0);
     });
 
-    it("Random User views Speaker Standings (Only Visible Round - Speaker 1 is Leader)", async () => {
+    it("Random User views Speaker Standings (Only Visible Round - raw totals)", async () => {
       const res = await request(app)
         .get(`/api/events/${eventId}/standings/calculated/speakers`)
         .set("Authorization", `Bearer ${randomToken}`);
@@ -280,11 +280,19 @@ describe("Standings API Endpoints", () => {
       expect(res.statusCode).toEqual(200);
       const standings = res.body.data;
 
-      expect(standings[0].id).toBe(p1Id);
-      expect(standings[0].total_points).toBe(88);
-
-      expect(standings[1].id).toBe(p2Id);
-      expect(standings[1].total_points).toBe(80);
+      // plain sums of speech scores: no bonus for the team's place
+      expect(standings[0]).toMatchObject({
+        id: p1Id,
+        total_points: 80,
+        average_score: 80,
+        speeches: 1,
+      });
+      expect(standings[1]).toMatchObject({
+        id: p2Id,
+        total_points: 80,
+        average_score: 80,
+        speeches: 1,
+      });
     });
 
     it("Owner views Team Standings (Both Rounds - Mathematical Tie)", async () => {
@@ -313,8 +321,8 @@ describe("Standings API Endpoints", () => {
       const p1 = standings.find((s) => s.id === p1Id);
       const p2 = standings.find((s) => s.id === p2Id);
 
-      expect(p1.total_points).toBe(168);
-      expect(p2.total_points).toBe(168);
+      expect(p1).toMatchObject({ total_points: 160, average_score: 80, speeches: 2 });
+      expect(p2).toMatchObject({ total_points: 160, average_score: 80, speeches: 2 });
     });
   });
 });

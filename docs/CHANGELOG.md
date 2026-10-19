@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Iron speeches:** a ballot can mark one of an iron-person's two speeches `is_iron` (by default the later one); it counts for the team but stays out of the speaker standings, speaker stats and user stats. Room reads carry the flag. A speaker score may name `participant_id`, the team member who actually gave the speech, so an absent teammate is not credited.
 - **Room prep end:** rooms carry `prep_ends_at`, when prep ends and the debate starts. The motion route accepts it, `PATCH /rooms/:roomId/prep` moves or clears it while the room is open, and room reads return it.
 
+### Fixed
+
+- **Speaker standings:** `/standings/calculated/speakers` totals are the plain sum of a speaker's speech scores; the place bonus (score x (1 + (N - rank) x 0.1)) is gone. Rows add `average_score` and `speeches`, and ties on the total sort by average.
+
 ## [1.3.1] - 2026-05-11
 
 ### Fixed

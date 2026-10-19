@@ -777,6 +777,11 @@ paths:
     get:
       tags: [standings]
       summary: Calculated team standings (points derived from ranks)
+      description: >
+        Array of `{ id, name, total_points }`, highest first. A team earns
+        N - rank points per ranked room, N being the teams in that room
+        (3/2/1/0 in British Parliamentary). Swing teams count toward N but
+        are not listed.
       parameters:
         - $ref: "#/components/parameters/eventId"
       responses:
@@ -787,7 +792,15 @@ paths:
   /events/{eventId}/standings/calculated/speakers:
     get:
       tags: [standings]
-      summary: Calculated speaker standings
+      summary: Calculated speaker standings (raw speech-score totals)
+      description: >
+        Array of `{ id, name, total_points, average_score, speeches }`.
+        `total_points` is the plain sum of the speaker's speech scores (no
+        bonus for the team's place), `speeches` the number of speeches
+        counted and `average_score` their mean (2 d.p.; 0 without
+        speeches). Sorted by total_points, then average_score, highest
+        first. Only speeches in ranked rooms count; an iron-person's iron
+        speech and speeches in a swing slot are left out.
       parameters:
         - $ref: "#/components/parameters/eventId"
       responses:

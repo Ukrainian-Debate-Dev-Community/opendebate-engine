@@ -124,10 +124,10 @@ const getSpeakerStandings = async (req, res, next) => {
   }
 };
 
-// DEVELOPER NOTE:
-// I was asked to write the calculated routes as well. The logic that I use for N teams:
-// Team points: SUM of (N-Rank)
-// Speaker points: SUM of (Score * (1 + (N-Rank) * 0.1 ))
+// Calculated standings, for N teams in a room:
+// Team points: SUM of (N - rank)
+// Speaker points: plain SUM of the speaker's speech scores, with their
+// average and the number of speeches counted
 
 const getCalculatedTeamStandings = async (req, res, next) => {
   try {
@@ -206,16 +206,13 @@ const getCalculatedSpeakerStandings = async (req, res, next) => {
       attributes: ["id", "room_id", "rank", "team_id"],
     });
 
-    // swing teams still count toward a room's N (they held a slot and a
-    // rank), but their speakers' scores are skipped below
+    // speeches delivered in a swing slot are skipped below
     const swingTeamIds = await getSwingTeamIds(eventId);
     const swingRoomTeamIds = new Set();
-    const roomSizes = Object.create(null);
-    const rtToData = Object.create(null);
+    const rtToRank = Object.create(null);
 
     roomTeams.forEach((rt) => {
-      roomSizes[rt.room_id] = (roomSizes[rt.room_id] || 0) + 1;
-      rtToData[rt.id] = { roomId: rt.room_id, rank: rt.rank };
+      rtToRank[rt.id] = rt.rank;
       if (swingTeamIds.has(rt.team_id)) {
         swingRoomTeamIds.add(rt.id);
       }
@@ -232,22 +229,25 @@ const getCalculatedSpeakerStandings = async (req, res, next) => {
 
     const standings = Object.create(null);
     speakers.forEach((s) => {
-      standings[s.id] = { id: s.id, name: s.display_name, total_points: 0 };
+      standings[s.id] = {
+        id: s.id,
+        name: s.display_name,
+        total_points: 0,
+        average_score: 0,
+        speeches: 0,
+      };
     });
 
     roomSpeakers.forEach((rs) => {
       if (swingRoomTeamIds.has(rs.room_team_id)) {
         return; // swing slot: performance excluded from speaker standings
       }
-      if (standings[rs.participant_id] && rs.Scores && rs.Scores.length > 0) {
-        const teamData = rtToData[rs.room_team_id];
-
-        if (teamData && teamData.rank !== null) {
-          const n = roomSizes[teamData.roomId];
-          const scoreValue = parseFloat(rs.Scores[0].value);
-          const multiplier = 1 + (n - teamData.rank) * 0.1;
-
-          standings[rs.participant_id].total_points += scoreValue * multiplier;
+      const standing = standings[rs.participant_id];
+      if (standing && rs.Scores && rs.Scores.length > 0) {
+        const rank = rtToRank[rs.room_team_id];
+        if (rank !== undefined && rank !== null) {
+          standing.total_points += parseFloat(rs.Scores[0].value);
+          standing.speeches += 1;
         }
       }
     });
@@ -255,9 +255,16 @@ const getCalculatedSpeakerStandings = async (req, res, next) => {
     const sortedStandings = Object.values(standings)
       .map((s) => {
         s.total_points = parseFloat(s.total_points.toFixed(2));
+        s.average_score =
+          s.speeches > 0
+            ? parseFloat((s.total_points / s.speeches).toFixed(2))
+            : 0;
         return s;
       })
-      .sort((a, b) => b.total_points - a.total_points);
+      .sort(
+        (a, b) =>
+          b.total_points - a.total_points || b.average_score - a.average_score,
+      );
 
     res.status(200).json({ status: "success", data: sortedStandings });
   } catch (error) {

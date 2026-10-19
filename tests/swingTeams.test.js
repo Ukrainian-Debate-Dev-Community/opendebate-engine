@@ -206,7 +206,7 @@ describe("Swing Team Flag", () => {
     expect(res.body.data[p2].rooms).toEqual({});
   });
 
-  it("should exclude swing speeches from calculated speaker standings while keeping room size", async () => {
+  it("should exclude swing speeches from calculated speaker standings", async () => {
     const res = await request(app)
       .get(`/api/events/${eventId}/standings/calculated/speakers`)
       .set("Authorization", `Bearer ${ownerToken}`);
@@ -214,11 +214,11 @@ describe("Swing Team Flag", () => {
     expect(res.statusCode).toEqual(200);
     const byId = {};
     res.body.data.forEach((s) => (byId[s.id] = s));
-    // N = 2 teams in the room (the swing slot still counts toward N):
-    // 80 * (1 + (2 - 1) * 0.1) = 88
-    expect(byId[p1].total_points).toEqual(88);
+    expect(byId[p1].total_points).toEqual(80);
+    expect(byId[p1].speeches).toEqual(1);
     // swing speaker accumulates nothing
     expect(byId[p2].total_points).toEqual(0);
+    expect(byId[p2].speeches).toEqual(0);
   });
 
   it("should exclude swing teams from raw team standings", async () => {
