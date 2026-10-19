@@ -1,0 +1,722 @@
+#!/usr/bin/env python3
+"""Release one repo of the opendebate platform.
+
+The same file lives in every repo (scripts/release); the repo's Makefile
+passes its settings. One release is: the next version vX.Y.Z (the last
+release tag bumped), written into the version files, a CHANGELOG
+section, the commit `chore(release): <name> v<version>` on nightly, main
+fast-forwarded to it once CI passes, the annotated tag and the GitHub
+release with the same notes.
+
+  scripts/release --name NAME --repo OWNER/REPO --ci WORKFLOW
+                  --files "FILE ..." --changelog PATH [--artifact TEXT]
+                  (--bump patch|minor|major | --version X.Y.Z)
+                  [--since REF] [--dry-run] [--resume] [--timeout MINUTES]
+  scripts/release --self-test
+
+--dry-run prints the next version, the file changes and the notes, and
+changes nothing. --resume finishes a release whose commit is already
+made (pushes it if needed, waits for CI, moves main, tags, publishes).
+--since REF takes the notes from REF instead of the last release tag
+(for a first release). Python 3 standard library only.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+
+SEMVER = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+TAG = re.compile(r"^v\d+\.\d+\.\d+$")
+CONVENTIONAL = re.compile(
+    r"^(?P<type>[A-Za-z]+)(?:\((?P<scope>[^()]*)\))?(?P<bang>!)?:\s*(?P<desc>.+)$"
+)
+PR_SUFFIX = re.compile(r"\s*\(#(\d+)\)\s*$")
+MERGE_PR = re.compile(r"^Merge pull request #(\d+) from \S+")
+MERGE_OTHER = re.compile(r"^Merge (branch|remote-tracking branch|tag) ")
+BREAKING_FOOTER = re.compile(r"^BREAKING[ -]CHANGE:", re.M)
+NOREPLY = re.compile(r"^(?:\d+\+)?(?P<login>[^@]+)@users\.noreply\.github\.com$")
+SLUG = re.compile(r"github\.com[:/]+(?P<slug>[^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+
+TYPE_ORDER = ["feat", "fix", "perf", "refactor", "revert", "test", "ci",
+              "build", "docs", "style", "chore", "other"]
+PLURAL = {"feat": ("feature", "features"), "fix": ("fix", "fixes")}
+ASCII = {"\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+         "\u201c": '"', "\u201d": '"', "\u2026": "...", "\u00a0": " ", "\u2192": "->",
+         "\u00ab": '"', "\u00bb": '"'}
+
+
+class Abort(Exception):
+    pass
+
+
+# ---------------------------------------------------------------
+# Versions
+# ---------------------------------------------------------------
+
+def parse_version(text):
+    m = SEMVER.match(text.strip())
+    if not m:
+        raise Abort("not a version X.Y.Z: %r" % text)
+    return tuple(int(x) for x in m.groups())
+
+
+def fmt_version(v):
+    return "%d.%d.%d" % v
+
+
+def bump(v, kind):
+    major, minor, patch = v
+    if kind == "major":
+        return (major + 1, 0, 0)
+    if kind == "minor":
+        return (major, minor + 1, 0)
+    if kind == "patch":
+        return (major, minor, patch + 1)
+    raise Abort("BUMP must be patch, minor or major, not %r" % kind)
+
+
+def latest_tag(tags):
+    found = [t for t in tags if TAG.match(t)]
+    if not found:
+        return None
+    return max(found, key=parse_version)
+
+
+# ---------------------------------------------------------------
+# Version files
+# ---------------------------------------------------------------
+
+def _sub_once(text, pattern, version, what, flags=0):
+    rx = re.compile(pattern, flags)
+    found = rx.findall(text)
+    if len(found) != 1:
+        raise Abort("%s: expected one version entry, found %d" % (what, len(found)))
+    old = rx.search(text).group(2)
+    return rx.sub(lambda m: m.group(1) + version + m.group(3), text, count=1), old
+
+
+def update_mix(text, version, path="mix.exs"):
+    return _sub_once(text, r'(\bversion:\s*")([^"]*)(")', version, path)
+
+
+def update_package_json(text, version, path="package.json"):
+    new, old = _sub_once(text, r'^(  "version": ")([^"]*)(")', version, path, re.M)
+    if json.loads(new).get("version") != version:
+        raise Abort("%s: the version did not land at the top level" % path)
+    return new, old
+
+
+def update_package_lock(text, version, path="package-lock.json"):
+    new, old = _sub_once(text, r'^(  "version": ")([^"]*)(")', version, path, re.M)
+    root = re.search(r'^    "": \{\n', new, re.M)
+    if not root:
+        raise Abort('%s: no packages[""] entry' % path)
+    rx = re.compile(r'^(      "version": ")([^"]*)(")', re.M)
+    m = rx.search(new, root.end())
+    if not m:
+        raise Abort('%s: no version in packages[""]' % path)
+    new = new[:m.start()] + m.group(1) + version + m.group(3) + new[m.end():]
+    before, after = json.loads(text), json.loads(new)
+    if after["version"] != version or after["packages"][""]["version"] != version:
+        raise Abort("%s: the root versions did not land" % path)
+    for doc in (before, after):
+        doc.pop("version")
+        doc["packages"][""].pop("version")
+    if before != after:
+        raise Abort("%s: more than the two root versions would change" % path)
+    return new, old
+
+
+def update_version_file(text, version, path="VERSION"):
+    return version + "\n", (text.strip() or None)
+
+
+UPDATERS = {
+    "mix.exs": update_mix,
+    "package.json": update_package_json,
+    "package-lock.json": update_package_lock,
+    "VERSION": update_version_file,
+}
+
+
+def plan_files(paths, version):
+    """[(path, old version, new text)] for every version file."""
+    out = []
+    for path in paths:
+        updater = UPDATERS.get(os.path.basename(path))
+        if not updater:
+            raise Abort("no version updater for %s" % path)
+        if os.path.exists(path):
+            with open(path) as f:
+                text = f.read()
+        elif os.path.basename(path) == "VERSION":
+            text = ""
+        else:
+            raise Abort("version file %s is missing" % path)
+        new, old = updater(text, version, path)
+        out.append((path, old, new))
+    return out
+
+
+def prepend_changelog(existing, section):
+    """The new section goes above the first `## ` heading, under the title."""
+    if not existing.strip():
+        return "# Changelog\n\n" + section
+    m = re.search(r"^## ", existing, re.M)
+    if not m:
+        return existing.rstrip("\n") + "\n\n" + section
+    return existing[:m.start()] + section + "\n" + existing[m.start():]
+
+
+# ---------------------------------------------------------------
+# Release notes
+# ---------------------------------------------------------------
+
+def ascii_text(text):
+    """Notes go into repo files, which stay ASCII."""
+    text = "".join(ASCII.get(ch, ch) for ch in text)
+    text = "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+    return re.sub(r"[^\x00-\x7f]+", "?", text)
+
+
+def parse_commit(sha, subject, body):
+    """One first-parent commit as a change, or None to leave it out."""
+    pr = None
+    title = subject.strip()
+    m = MERGE_PR.match(title)
+    if m:
+        pr = m.group(1)
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+        title = lines[0] if lines else title
+        body = "\n".join(lines[1:])
+    elif MERGE_OTHER.match(title):
+        return None
+    m = PR_SUFFIX.search(title)
+    if m:
+        pr = pr or m.group(1)
+        title = title[:m.start()]
+    if title.startswith("chore(release):"):
+        return None
+    m = CONVENTIONAL.match(title)
+    if m:
+        ctype, scope, desc = m.group("type").lower(), m.group("scope"), m.group("desc")
+        bang = bool(m.group("bang"))
+    else:
+        ctype, scope, desc, bang = "other", None, title, False
+    return {
+        "sha": sha, "type": ctype, "scope": scope or None, "desc": ascii_text(desc.strip()),
+        "pr": pr, "breaking": bang or bool(BREAKING_FOOTER.search(body)),
+    }
+
+
+def stats_line(changes):
+    counts = {}
+    for c in changes:
+        counts[c["type"]] = counts.get(c["type"], 0) + 1
+    order = sorted(counts, key=lambda t: (TYPE_ORDER.index(t) if t in TYPE_ORDER else 99, t))
+    parts = []
+    for t in order:
+        n = counts[t]
+        one, many = PLURAL.get(t, (t, t))
+        parts.append("%d %s" % (n, one if n == 1 else many))
+    breaking = sum(1 for c in changes if c["breaking"])
+    return "%s; breaking: %d" % (", ".join(parts) or "no changes", breaking)
+
+
+def _line(c, with_type):
+    if with_type and c["type"] != "other":
+        head = c["type"] + ("(%s)" % c["scope"] if c["scope"] else "")
+    else:
+        head = c["scope"]
+    ref = " (#%s)" % c["pr"] if c["pr"] else " (%s)" % c["sha"][:7]
+    return "- %s%s%s by %s" % (head + ": " if head else "", c["desc"], ref, c["who"])
+
+
+def render_notes(changes):
+    """The notes body: stats, Breaking, Features, Fixes, Other, Contributors."""
+    out = [stats_line(changes), ""]
+    sections = [
+        ("Breaking", [c for c in changes if c["breaking"]], True),
+        ("Features", [c for c in changes if not c["breaking"] and c["type"] == "feat"], False),
+        ("Fixes", [c for c in changes if not c["breaking"] and c["type"] == "fix"], False),
+        ("Other", [c for c in changes if not c["breaking"] and c["type"] not in ("feat", "fix")], True),
+    ]
+    for title, items, with_type in sections:
+        if items:
+            out.append("### " + title)
+            out.append("")
+            out.extend(_line(c, with_type) for c in items)
+            out.append("")
+    counts, shown = {}, {}
+    for c in changes:
+        key = c["who"].lower()
+        shown.setdefault(key, c["who"])
+        counts[key] = counts.get(key, 0) + 1
+    if counts:
+        out.append("### Contributors")
+        out.append("")
+        for key in sorted(counts, key=lambda w: (-counts[w], w)):
+            n = counts[key]
+            out.append("- %s: %d commit%s" % (shown[key], n, "" if n == 1 else "s"))
+        out.append("")
+    return ascii_text("\n".join(out).rstrip("\n") + "\n")
+
+
+def changelog_section(version, notes, date):
+    return "## v%s - %s\n\n%s" % (version, date, notes)
+
+
+# ---------------------------------------------------------------
+# git and gh
+# ---------------------------------------------------------------
+
+def run(args, check=True):
+    p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                       universal_newlines=True)
+    if check and p.returncode != 0:
+        raise Abort("%s failed:\n%s" % (" ".join(args), (p.stderr or p.stdout).strip()))
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def ok(args):
+    return subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def git(*args, **kw):
+    return run(["git"] + list(args), **kw)
+
+
+def find_remote(slug):
+    for name in git("remote").split():
+        m = SLUG.search(git("remote", "get-url", name))
+        if m and m.group("slug").lower() == slug.lower():
+            return name
+    raise Abort("no git remote points at github.com/%s" % slug)
+
+
+def commits(base, ref):
+    rng = "%s..%s" % (base, ref) if base else ref
+    raw = git("log", "--first-parent", "--format=%H%x1f%an%x1f%ae%x1f%s%x1f%b%x1e", rng)
+    out = []
+    for rec in raw.split("\x1e"):
+        rec = rec.strip("\n")
+        if not rec:
+            continue
+        sha, name, email, subject, body = (rec.split("\x1f") + [""] * 5)[:5]
+        c = parse_commit(sha, subject, body)
+        if c:
+            c["name"], c["email"] = name, email
+            out.append(c)
+    return out
+
+
+class Logins:
+    """GitHub login per commit author, asked once per e-mail; the
+    noreply address, then the git author name, when GitHub does not know."""
+
+    def __init__(self, slug):
+        self.slug, self.cache = slug, {}
+
+    def who(self, c):
+        key = c["email"].lower()
+        if key not in self.cache:
+            login = None
+            p = subprocess.run(
+                ["gh", "api", "repos/%s/commits/%s" % (self.slug, c["sha"]), "--jq", ".author.login"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+            if p.returncode == 0 and p.stdout.strip() not in ("", "null"):
+                login = p.stdout.strip()
+            m = NOREPLY.match(c["email"])
+            if not login and m:
+                login = m.group("login")
+            self.cache[key] = "@" + login if login else ascii_text(c["name"])
+        return self.cache[key]
+
+
+def ci_run(slug, workflow, sha):
+    """(status, conclusion, url) of the newest run of the workflow on sha, or None."""
+    out = run(["gh", "run", "list", "-R", slug, "--workflow", workflow, "--commit", sha,
+               "--limit", "20", "--json", "status,conclusion,createdAt,url"], check=False)
+    try:
+        runs = json.loads(out or "[]")
+    except ValueError:
+        return None
+    if not runs:
+        return None
+    r = max(runs, key=lambda r: r["createdAt"])
+    return r["status"], r["conclusion"], r["url"]
+
+
+def remote_tag_exists(remote, tag):
+    return bool(git("ls-remote", "--tags", remote, "refs/tags/" + tag, check=False))
+
+
+# ---------------------------------------------------------------
+# The release
+# ---------------------------------------------------------------
+
+def preconditions(remote, slug, workflow, tag):
+    """Problems that refuse a release ([] when ready)."""
+    problems = []
+    branch = git("rev-parse", "--abbrev-ref", "HEAD")
+    if branch != "nightly":
+        problems.append("on branch %s: switch to nightly" % branch)
+    if git("status", "--porcelain", "--untracked-files=no"):
+        problems.append("the working tree has uncommitted changes")
+    head = git("rev-parse", "HEAD")
+    upstream = git("rev-parse", "--verify", "--quiet", "%s/nightly" % remote, check=False)
+    if head != upstream:
+        problems.append("HEAD is not %s/nightly: pull or push first" % remote)
+    target = upstream or head
+    r = ci_run(slug, workflow, target)
+    if not r:
+        problems.append("no %s run on %s" % (workflow, target[:7]))
+    elif r[1] != "success":
+        problems.append("%s on %s is %s: %s" % (workflow, target[:7], r[1] or r[0], r[2]))
+    if tag and (git("tag", "-l", tag) or remote_tag_exists(remote, tag)):
+        problems.append("tag %s already exists" % tag)
+    return problems
+
+
+def confirm(expected):
+    try:
+        tty = open("/dev/tty")
+    except OSError:
+        raise Abort("no terminal to confirm on: run the release from a terminal")
+    sys.stdout.write("type %s to release, anything else cancels: " % expected)
+    sys.stdout.flush()
+    answer = tty.readline().strip()
+    tty.close()
+    if answer != expected:
+        raise Abort("cancelled: nothing was changed")
+
+
+def wait_ci(slug, workflow, sha, timeout_min):
+    deadline = time.time() + timeout_min * 60
+    print("waiting for %s on %s (up to %d min)" % (workflow, sha[:7], timeout_min))
+    while True:
+        r = ci_run(slug, workflow, sha)
+        if r and r[0] == "completed":
+            if r[1] == "success":
+                print("CI passed: %s" % r[2])
+                return
+            raise Abort("CI on %s ended %s: %s" % (sha[:7], r[1], r[2]))
+        if time.time() > deadline:
+            raise Abort("CI on %s did not finish within %d min%s" % (
+                sha[:7], timeout_min, (": " + r[2]) if r else ""))
+        time.sleep(20)
+
+
+def publish(ctx, done):
+    """CI, main, tag, GitHub release; each step is skipped when already done."""
+    remote, slug, sha, tag = ctx["remote"], ctx["slug"], ctx["sha"], ctx["tag"]
+    wait_ci(slug, ctx["ci"], sha, ctx["timeout"])
+    git("fetch", "--quiet", remote, "main")
+    main = git("rev-parse", "%s/main" % remote)
+    if main == sha:
+        print("main is already at %s" % sha[:7])
+    else:
+        if not ok(["git", "merge-base", "--is-ancestor", main, sha]):
+            raise Abort("%s/main (%s) is not an ancestor of %s: main cannot fast-forward" % (remote, main[:7], sha[:7]))
+        git("push", remote, "%s:refs/heads/main" % sha)
+        print("main -> %s" % sha[:7])
+    done.append("main fast-forwarded to %s" % sha[:7])
+    local = git("rev-parse", "--verify", "--quiet", tag + "^{commit}", check=False)
+    if local and local != sha:
+        raise Abort("tag %s exists locally on %s, not on %s" % (tag, local[:7], sha[:7]))
+    if not local:
+        git("tag", "-a", tag, "-F", ctx["tag_file"], sha)
+    if not remote_tag_exists(remote, tag):
+        git("push", remote, "refs/tags/" + tag)
+    print("tag %s pushed" % tag)
+    done.append("tag %s pushed" % tag)
+    title = "%s %s" % (ctx["name"], tag)
+    if ok(["gh", "release", "view", tag, "-R", slug]):
+        run(["gh", "release", "edit", tag, "-R", slug, "--title", title, "--notes-file", ctx["notes_file"]])
+    else:
+        run(["gh", "release", "create", tag, "-R", slug, "--title", title,
+             "--notes-file", ctx["notes_file"], "--verify-tag"])
+    done.append("GitHub release %s published" % tag)
+    print("GitHub release %s: https://github.com/%s/releases/tag/%s" % (tag, slug, tag))
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(description="Release this repo (see the file's header).")
+    ap.add_argument("--name")
+    ap.add_argument("--repo", help="OWNER/REPO on GitHub, where nightly, main and the tags live")
+    ap.add_argument("--ci", help="the CI workflow file that must pass, e.g. ci.yml")
+    ap.add_argument("--files", default="", help="space-separated version files")
+    ap.add_argument("--changelog", default="CHANGELOG.md")
+    ap.add_argument("--artifact", default="", help="what the tag publishes; {version} is replaced")
+    ap.add_argument("--bump", choices=["patch", "minor", "major"])
+    ap.add_argument("--version", dest="version")
+    ap.add_argument("--since", help="take the notes from this ref instead of the last tag")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--timeout", type=int, default=45, help="minutes to wait for CI")
+    ap.add_argument("--self-test", action="store_true")
+    a = ap.parse_args(argv)
+
+    if a.self_test:
+        return self_test()
+    for need in ("name", "repo", "ci"):
+        if not getattr(a, need):
+            raise Abort("--%s is required" % need)
+    if a.resume and (a.bump or a.version or a.dry_run):
+        raise Abort("--resume takes the version from the release commit: no BUMP, VERSION or DRY_RUN")
+    if not a.resume and not (a.bump or a.version):
+        raise Abort("usage: make release BUMP=patch|minor|major (or VERSION=X.Y.Z); DRY_RUN=1 to preview")
+
+    os.chdir(git("rev-parse", "--show-toplevel"))
+    remote = find_remote(a.repo)
+    files = a.files.split()
+    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    release_subject = re.compile(r"^chore\(release\): %s v(\d+\.\d+\.\d+)$" % re.escape(a.name))
+
+    if not a.dry_run:
+        git("fetch", "--quiet", "--tags", remote)
+    if a.resume:
+        m = release_subject.match(git("log", "-1", "--format=%s"))
+        if not m:
+            raise Abort("HEAD is not a release commit 'chore(release): %s vX.Y.Z'" % a.name)
+        version, ref, sha = m.group(1), "HEAD~1", git("rev-parse", "HEAD")
+        if git("status", "--porcelain", "--untracked-files=no"):
+            raise Abort("the working tree has uncommitted changes")
+    else:
+        ref = "HEAD" if not a.dry_run else (
+            "%s/nightly" % remote if git("rev-parse", "--verify", "--quiet", "%s/nightly" % remote, check=False) else "HEAD")
+        version = None
+
+    tags = git("tag", "--merged", ref).split()
+    last = latest_tag(tags)
+    if version is None:
+        base = parse_version(last) if last else (0, 0, 0)
+        if a.version:
+            version = fmt_version(parse_version(a.version))
+            if last and parse_version(version) <= base:
+                raise Abort("VERSION %s is not above the last release %s" % (version, last))
+        else:
+            version = fmt_version(bump(base, a.bump))
+    tag = "v" + version
+
+    if not a.resume:
+        problems = preconditions(remote, a.repo, a.ci, tag)
+        if problems and not a.dry_run:
+            raise Abort("refusing to release:\n  - " + "\n  - ".join(problems))
+
+    notes_base = a.since or last
+    changes = commits(notes_base, ref)
+    if not changes and not a.dry_run and not a.resume:
+        raise Abort("nothing to release since %s" % (notes_base or "the first commit"))
+    logins = Logins(a.repo)
+    for c in changes:
+        c["who"] = logins.who(c)
+    notes = render_notes(changes)
+    section = changelog_section(version, notes, today)
+    plan = plan_files(files, version)
+    artifact = a.artifact.replace("{version}", version)
+    expected = "%s:%s" % (a.name, tag)
+    target = git("rev-parse", ref)
+
+    print("=" * 64)
+    print("%s %s%s" % (a.name, tag, "  (dry run: nothing changes)" if a.dry_run else ""))
+    print("=" * 64)
+    print("repo:      %s (remote %s)" % (a.repo, remote))
+    print("previous:  %s" % (last or "none (first release)"))
+    print("notes:     %s..%s %s" % (notes_base or "(start)", target[:7], git("log", "-1", "--format=%s", target)))
+    print("changes:   %s" % stats_line(changes))
+    if a.dry_run:
+        problems = preconditions(remote, a.repo, a.ci, tag)
+        if not changes:
+            problems.append("nothing to release since %s" % (notes_base or "the first commit"))
+        for p in problems:
+            print("would refuse now: %s" % p)
+        if not problems:
+            print("checks:    ready (nightly, clean, CI green, tag free)")
+    print("will:")
+    if not a.resume:
+        for path, old, _ in plan:
+            print("  - set %s: %s -> %s" % (path, old or "(new)", version))
+        print("  - prepend the section to %s" % a.changelog)
+        print("  - commit 'chore(release): %s %s' on nightly and push it to %s" % (a.name, tag, remote))
+    print("  - wait for %s to pass on the release commit" % a.ci)
+    print("  - fast-forward %s/main to it" % remote)
+    print("  - tag %s (annotated, with the notes) and push the tag" % tag)
+    print("  - publish the GitHub release %s with the notes" % tag)
+    if artifact:
+        print("  - the tag then publishes %s" % artifact)
+    print("-" * 64)
+    print(section)
+    print("-" * 64)
+    if a.dry_run:
+        print("dry run: to release, type %s at the prompt of a real run" % expected)
+        return 0
+
+    confirm(expected)
+
+    tmp = tempfile.mkdtemp(prefix="release-")
+    notes_file = os.path.join(tmp, "notes.md")
+    tag_file = os.path.join(tmp, "tag.txt")
+    with open(notes_file, "w") as f:
+        f.write(notes)
+    with open(tag_file, "w") as f:
+        f.write("%s %s\n\n%s" % (a.name, tag, notes))
+
+    done = []
+    try:
+        if a.resume:
+            if not ok(["git", "merge-base", "--is-ancestor", sha, "%s/nightly" % remote]):
+                if git("rev-parse", "%s/nightly" % remote) != git("rev-parse", "HEAD~1"):
+                    raise Abort("%s/nightly moved since the release commit was made: start over" % remote)
+                git("push", remote, "HEAD:refs/heads/nightly")
+                print("nightly -> %s" % sha[:7])
+            done.append("release commit %s on %s/nightly" % (sha[:7], remote))
+        else:
+            for path, _, new in plan:
+                with open(path, "w") as f:
+                    f.write(new)
+            old_log = ""
+            if os.path.exists(a.changelog):
+                with open(a.changelog) as f:
+                    old_log = f.read()
+            with open(a.changelog, "w") as f:
+                f.write(prepend_changelog(old_log, section))
+            git("add", "--", a.changelog, *[p for p, _, _ in plan])
+            git("commit", "--quiet", "-m", "chore(release): %s %s" % (a.name, tag))
+            sha = git("rev-parse", "HEAD")
+            done.append("release commit %s made on nightly" % sha[:7])
+            git("push", remote, "HEAD:refs/heads/nightly")
+            done.append("nightly pushed to %s" % remote)
+            print("nightly -> %s" % sha[:7])
+        publish({"remote": remote, "slug": a.repo, "sha": sha, "tag": tag, "ci": a.ci,
+                 "timeout": a.timeout, "name": a.name, "notes_file": notes_file,
+                 "tag_file": tag_file}, done)
+    except (Abort, KeyboardInterrupt) as e:
+        print("\nrelease stopped: %s" % (e if isinstance(e, Abort) else "interrupted"), file=sys.stderr)
+        print("done so far:" if done else "nothing was pushed.", file=sys.stderr)
+        for d in done:
+            print("  - " + d, file=sys.stderr)
+        if done:
+            print("to finish (CI, main, tag, GitHub release), fix the cause and run from this\n"
+                  "checkout, still on the release commit: make release RESUME=1", file=sys.stderr)
+        elif not a.resume and git("status", "--porcelain", "--untracked-files=no", check=False):
+            print("the version files and changelog are edited but not committed: git checkout -- .",
+                  file=sys.stderr)
+        return 1
+    print("released %s %s" % (a.name, tag))
+    return 0
+
+
+# ---------------------------------------------------------------
+# Self-test: the bump, the version files and the notes
+# ---------------------------------------------------------------
+
+def self_test():
+    def eq(got, want):
+        assert got == want, "got %r, want %r" % (got, want)
+
+    eq(bump((0, 4, 2), "patch"), (0, 4, 3))
+    eq(bump((0, 4, 2), "minor"), (0, 5, 0))
+    eq(bump((0, 4, 2), "major"), (1, 0, 0))
+    eq(bump((0, 0, 0), "minor"), (0, 1, 0))
+    eq(parse_version("v1.2.3"), (1, 2, 3))
+    eq(latest_tag(["v0.9.0", "v0.10.0", "v0.4.2", "v1.0.0-rc1", "nightly"]), "v0.10.0")
+    eq(latest_tag(["x"]), None)
+    for bad in ("1.2", "v1.2.3.4", "1.2.x"):
+        try:
+            parse_version(bad)
+            raise AssertionError("accepted %s" % bad)
+        except Abort:
+            pass
+
+    mix = 'def project do\n  [\n    app: :x,\n    version: "0.1.0",\n    elixir: "~> 1.18"\n  ]\nend\n'
+    new, old = update_mix(mix, "0.4.3")
+    eq(old, "0.1.0")
+    assert 'version: "0.4.3"' in new and 'elixir: "~> 1.18"' in new
+    pkg = '{\n  "name": "opendebate-engine",\n  "version": "1.3.1",\n  "dependencies": {\n    "a": {\n  "version": "9"\n    }\n  }\n}\n'
+    try:
+        update_package_json(pkg, "1.4.0")
+        raise AssertionError("accepted two top-level-looking versions")
+    except Abort:
+        pass
+    pkg = '{\n  "name": "opendebate-engine",\n  "version": "1.3.1",\n  "dependencies": {\n    "a": "^1.0.0"\n  }\n}\n'
+    new, old = update_package_json(pkg, "1.4.0")
+    eq((old, json.loads(new)["version"]), ("1.3.1", "1.4.0"))
+    lock = json.dumps({
+        "name": "opendebate-engine", "version": "1.3.1", "lockfileVersion": 3,
+        "packages": {"": {"name": "opendebate-engine", "version": "1.3.1"},
+                     "node_modules/a": {"version": "1.3.1"}}}, indent=2) + "\n"
+    new, old = update_package_lock(lock, "1.4.0")
+    doc = json.loads(new)
+    eq((doc["version"], doc["packages"][""]["version"], doc["packages"]["node_modules/a"]["version"]),
+       ("1.4.0", "1.4.0", "1.3.1"))
+    eq(update_version_file("", "0.1.0"), ("0.1.0\n", None))
+    eq(update_version_file("0.0.9\n", "0.1.0"), ("0.1.0\n", "0.0.9"))
+
+    eq(prepend_changelog("", "## v1\n"), "# Changelog\n\n## v1\n")
+    eq(prepend_changelog("# Changelog\n\nintro\n\n## [1.3.1]\n- a\n", "## v2\n"),
+       "# Changelog\n\nintro\n\n## v2\n\n## [1.3.1]\n- a\n")
+
+    c = parse_commit("a" * 40, "feat(rooms): a room keeps when its prep ends (#91)", "")
+    eq((c["type"], c["scope"], c["desc"], c["pr"], c["breaking"]),
+       ("feat", "rooms", "a room keeps when its prep ends", "91", False))
+    c = parse_commit("b" * 40, "feat(api)!: drop v1 (#5)", "")
+    assert c["breaking"]
+    c = parse_commit("c" * 40, "fix: x (#6)", "body\n\nBREAKING CHANGE: y")
+    assert c["breaking"]
+    c = parse_commit("d" * 40, "Merge pull request #9 from org/feat/cab-uploads",
+                     "feat(platform): club logos volume\n")
+    eq((c["type"], c["scope"], c["pr"]), ("feat", "platform", "9"))
+    c = parse_commit("e" * 40, "Tournament Elimination, Conflicts (#47)", "")
+    eq((c["type"], c["pr"]), ("other", "47"))
+    eq(parse_commit("f" * 40, "chore(release): uadebate v0.4.3", ""), None)
+    eq(parse_commit("f" * 40, "Merge branch 'nightly' into x", ""), None)
+
+    changes = []
+    for i, (s, who) in enumerate([
+            ("feat(a): one (#1)", "@x"), ("feat(b): two (#2)", "@y"), ("fix: three (#3)", "@x"),
+            ("ci: four (#4)", "@x"), ("chore(deps): five (#5)", "@dependabot[bot]"),
+            ("refactor!: six (#6)", "Some Name")]):
+        c = parse_commit("%040d" % i, s, "")
+        c["who"] = who
+        changes.append(c)
+    eq(stats_line(changes), "2 features, 1 fix, 1 refactor, 1 ci, 1 chore; breaking: 1")
+    notes = render_notes(changes)
+    for want in ("### Breaking\n\n- refactor: six (#6) by Some Name",
+                 "### Features\n\n- a: one (#1) by @x\n- b: two (#2) by @y",
+                 "### Fixes\n\n- three (#3) by @x",
+                 "### Other\n\n- ci: four (#4) by @x\n- chore(deps): five (#5) by @dependabot[bot]",
+                 "### Contributors\n\n- @x: 3 commits\n- @dependabot[bot]: 1 commit\n- @y: 1 commit\n- Some Name: 1 commit"):
+        assert want in notes, "missing %r in\n%s" % (want, notes)
+    eq(stats_line([]), "no changes; breaking: 0")
+    eq(ascii_text("ballot read-back \u2014 \u201cscores\u201d caf\u00e9"), 'ballot read-back - "scores" cafe')
+    eq(ascii_text("say \u00ab\u041f\u0440\u0430\u0432\u0438\u043b\u0430\u00bb"), 'say "?"')
+    c = parse_commit("1" * 40, "Expand API test coverage (#40)", "")
+    c["who"] = "@A"
+    d = parse_commit("2" * 40, "feat: z (#41)", "")
+    d["who"] = "@a"
+    notes = render_notes([c, d])
+    assert "- Expand API test coverage (#40) by @A" in notes, notes
+    assert "- @A: 2 commits" in notes, notes
+    eq(NOREPLY.match("49699333+dependabot[bot]@users.noreply.github.com").group("login"), "dependabot[bot]")
+    eq(SLUG.search("git@github.com:Ukrainian-Debate-Dev-Community/opendebate-engine.git").group("slug"),
+       "Ukrainian-Debate-Dev-Community/opendebate-engine")
+    eq(SLUG.search("https://github.com/merv1n34k/opendebate-engine").group("slug"),
+       "merv1n34k/opendebate-engine")
+    print("release self-test: ok")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Abort as e:
+        print("release: %s" % e, file=sys.stderr)
+        sys.exit(1)
