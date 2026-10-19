@@ -2,7 +2,7 @@
 name: Preview image
 
 # adding the `preview` label to a PR publishes
-# ghcr.io/<owner>/opendebate-api:sha-<head>; add it again after new
+# ghcr.io/<owner>/opendebate-engine:sha-<head>; add it again after new
 # commits for a fresh image
 "on":
   pull_request:
@@ -34,7 +34,7 @@ jobs:
           DOCKER_METADATA_PR_HEAD_SHA: "true"
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opendebate-api
+          images: ghcr.io/${{ github.repository_owner }}/opendebate-engine
           tags: |
             type=sha,prefix=sha-,format=short
       - name: Build and push Docker image

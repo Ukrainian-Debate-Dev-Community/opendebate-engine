@@ -1,11 +1,15 @@
 ---
 name: Publish Docker image
 
-# every merge to main publishes ghcr.io/<owner>/opendebate-api:main and
-# :sha-<commit>; deployments pin the sha tag
+# every push to main publishes ghcr.io/<owner>/opendebate-engine:main and
+# :sha-<commit> for testing; a release tag vX.Y.Z (made by make release,
+# which also writes the version into package.json) publishes :vX.Y.Z,
+# :X.Y and :latest, which deployments pin
 "on":
   push:
     branches: [main]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
@@ -32,10 +36,15 @@ jobs:
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
-          images: ghcr.io/${{ github.repository_owner }}/opendebate-api
+          images: ghcr.io/${{ github.repository_owner }}/opendebate-engine
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=main,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.ref_type == 'branch' }}
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
       - name: Build and push Docker image
         id: push
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
@@ -50,7 +59,6 @@ jobs:
         if: ${{ !env.ACT }}
         uses: actions/attest-build-provenance@v4
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/opendebate-api
+          subject-name: ghcr.io/${{ github.repository_owner }}/opendebate-engine
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
-
