@@ -7,6 +7,12 @@ const {
 } = require("../models");
 const { hasEventPrivilege } = require("../middleware/authMiddleware");
 const { getEventRooms } = require("../utils/finalRooms");
+const {
+  getCompletedEvents,
+  getVisibleRooms,
+  personKey,
+  personRows,
+} = require("../utils/organisationScope");
 
 // Swing teams occupy slots and hold ranks (so they still count toward a
 // room's N), but performances delivered in a swing slot are excluded from
@@ -272,7 +278,99 @@ const getCalculatedSpeakerStandings = async (req, res, next) => {
   }
 };
 
+// GET /api/organisations/:organisationId/standings/speakers
+// Every speaker of the organisation's finished events as one person per
+// user account (a guest: per participant, never merged by name), counted
+// like the per-event calculated speaker standings: raw points of ranked
+// slots, an iron-person's second speech and swing slots left out.
+const getOrganisationSpeakerStandings = async (req, res, next) => {
+  try {
+    const { organisationId } = req.params;
+    const events = await getCompletedEvents(organisationId);
+    const eventIds = events.map((e) => e.id);
+    if (eventIds.length === 0) {
+      return res.status(200).json({ status: "success", data: [] });
+    }
+
+    const speakers = await EventParticipant.findAll({
+      where: { event_id: eventIds, role: "speaker" },
+      attributes: ["id", "user_id", "display_name", "event_id"],
+      order: [
+        ["event_id", "ASC"],
+        ["id", "ASC"],
+      ],
+    });
+    const keyOf = Object.create(null);
+    speakers.forEach((s) => {
+      keyOf[s.id] = personKey(s);
+    });
+
+    const rooms = await getVisibleRooms(req.user, organisationId, eventIds);
+    const roomTeams = await RoomTeam.findAll({
+      where: { room_id: rooms.map((r) => r.id) },
+      attributes: ["id", "rank", "team_id"],
+    });
+
+    const swingTeamIds = new Set(
+      (
+        await Team.findAll({
+          where: { event_id: eventIds, is_swing: true },
+          attributes: ["id"],
+        })
+      ).map((t) => t.id),
+    );
+    const swingRoomTeamIds = new Set();
+    const rtToRank = Object.create(null);
+    roomTeams.forEach((rt) => {
+      rtToRank[rt.id] = rt.rank;
+      if (swingTeamIds.has(rt.team_id)) swingRoomTeamIds.add(rt.id);
+    });
+
+    const roomSpeakers = await RoomSpeaker.findAll({
+      where: { room_team_id: roomTeams.map((rt) => rt.id), is_iron: false },
+      attributes: ["id", "participant_id", "room_team_id"],
+      include: [{ model: Score, attributes: ["value"] }],
+    });
+
+    const people = personRows(speakers);
+    Object.values(people).forEach((person) => {
+      person.total_points = 0;
+      person.average_score = 0;
+      person.speeches = 0;
+    });
+
+    roomSpeakers.forEach((rs) => {
+      if (swingRoomTeamIds.has(rs.room_team_id)) return;
+      const person = people[keyOf[rs.participant_id]];
+      const rank = rtToRank[rs.room_team_id];
+      if (person && rs.Scores && rs.Scores.length > 0 && rank != null) {
+        person.total_points += parseFloat(rs.Scores[0].value);
+        person.speeches += 1;
+      }
+    });
+
+    const data = Object.values(people)
+      .map((p) => {
+        p.total_points = parseFloat(p.total_points.toFixed(2));
+        p.average_score =
+          p.speeches > 0
+            ? parseFloat((p.total_points / p.speeches).toFixed(2))
+            : 0;
+        return p;
+      })
+      .sort(
+        (a, b) =>
+          b.total_points - a.total_points || b.average_score - a.average_score,
+      );
+
+    res.status(200).json({ status: "success", data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
+  getOrganisationSpeakerStandings,
   getTeamStandings,
   getSpeakerStandings,
   getCalculatedSpeakerStandings,
