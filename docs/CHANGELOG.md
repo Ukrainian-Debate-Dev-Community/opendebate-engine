@@ -3,6 +3,18 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.5.0 - 2026-10-23
+
+1 feature; breaking: 0
+
+### Features
+
+- standings: organisation-wide speaker and adjudicator standings (#107) by @merv1n34k
+
+### Contributors
+
+- @merv1n34k: 1 commit
+
 ## v1.4.0 - 2026-10-19
 
 22 features, 12 fixes, 14 ci, 3 docs, 6 chore, 3 other; breaking: 0
