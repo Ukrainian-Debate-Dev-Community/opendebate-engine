@@ -364,6 +364,53 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /organisations/{organisationId}/standings/speakers:
+    get:
+      tags: [organisations]
+      summary: Speaker standings across the organisation's completed events
+      description: >
+        One row per person over the organisation's completed events:
+        participants are grouped by their user account (`user_id`); a guest
+        without one stays a row of their own (`participant_id`), never
+        merged by name. `name` is the person's latest display name.
+        Counted like `/events/{eventId}/standings/calculated/speakers`: raw
+        scores of ranked slots, an iron-person's second speech and swing
+        slots left out; `total_points`, `average_score` (2 d.p.) and
+        `speeches`, best total first. Hidden rounds count only where the
+        caller may see them (admin, an owner of the organisation, the
+        event's organiser). An organisation without completed events
+        gives an empty list.
+      parameters:
+        - $ref: "#/components/parameters/organisationId"
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /organisations/{organisationId}/stats/adjudicators:
+    get:
+      tags: [organisations]
+      summary: Adjudicator statistics across the organisation's completed events
+      description: >
+        One row per person, grouped like the organisation's speaker
+        standings: `rooms_adjudicated` (final rooms), `feedback_count` and
+        `avg_feedback` - the average over ALL the person's feedback in
+        those events, scored like `/events/{eventId}/stats/adjudicators`
+        (not an average of event averages). With `base`, the base counts
+        as one extra vote per person.
+      parameters:
+        - $ref: "#/components/parameters/organisationId"
+        - name: base
+          in: query
+          required: false
+          schema: { type: number }
+          description: A base score counted as one extra feedback vote.
+      responses:
+        "200": { $ref: "#/components/responses/Success" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /organisations/{organisationId}/restore:
     patch:
       tags: [organisations]

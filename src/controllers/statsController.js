@@ -19,6 +19,12 @@ const { Op } = require("sequelize");
 const AppError = require("../utils/AppError");
 const { hasEventPrivilege } = require("../middleware/authMiddleware");
 const { feedbackScore } = require("../utils/feedbackForm");
+const {
+  getCompletedEvents,
+  getVisibleRooms,
+  personKey,
+  personRows,
+} = require("../utils/organisationScope");
 
 const getUserStats = async (req, res, next) => {
   try {
@@ -484,7 +490,103 @@ const getOrganisationStats = async (req, res, next) => {
   }
 };
 
+// GET /api/organisations/:organisationId/stats/adjudicators?base=N
+// Every adjudicator of the organisation's finished events as one person
+// per user account (a guest: per participant, never merged by name):
+// final rooms adjudicated, the feedback counted and its average over ALL
+// that feedback - scored like the per-event stats, a given base counting
+// as one extra vote per person - not an average of event averages.
+const getOrganisationAdjudicatorStats = async (req, res, next) => {
+  try {
+    const { organisationId } = req.params;
+    const events = await getCompletedEvents(organisationId);
+    const eventIds = events.map((e) => e.id);
+
+    let base = null;
+    if (req.query.base !== undefined) {
+      base = Number(req.query.base);
+      if (req.query.base === "" || !Number.isFinite(base)) {
+        throw new AppError("base must be a number.", 400);
+      }
+    }
+
+    if (eventIds.length === 0) {
+      return res.status(200).json({ status: "success", data: [] });
+    }
+
+    const adjudicators = await EventParticipant.findAll({
+      where: { event_id: eventIds, role: "adjudicator" },
+      attributes: ["id", "user_id", "display_name", "event_id"],
+      order: [
+        ["event_id", "ASC"],
+        ["id", "ASC"],
+      ],
+    });
+    const adjudicatorIds = adjudicators.map((a) => a.id);
+    const keyOf = Object.create(null);
+    adjudicators.forEach((a) => {
+      keyOf[a.id] = personKey(a);
+    });
+
+    const rooms = await getVisibleRooms(req.user, organisationId, eventIds, {
+      finalOnly: true,
+    });
+    const roomIds = rooms.map((r) => r.id);
+
+    const roomAdjudicators = await RoomAdjudicator.findAll({
+      where: { room_id: roomIds, participant_id: adjudicatorIds },
+      attributes: ["participant_id", "room_id"],
+    });
+
+    // each event's form may score feedback from its answers
+    const countingIds = new Set(
+      (
+        await FeedbackQuestion.findAll({
+          where: { event_id: eventIds, counts_in_score: true },
+          attributes: ["id"],
+          paranoid: false,
+        })
+      ).map((q) => q.id),
+    );
+
+    const feedbacks = await Feedback.findAll({
+      where: { room_id: roomIds, adjudicator_id: adjudicatorIds },
+      attributes: ["id", "adjudicator_id", "score"],
+      include:
+        countingIds.size > 0 ? [{ model: FeedbackAnswer, as: "Answers" }] : [],
+    });
+
+    const people = personRows(adjudicators);
+    Object.values(people).forEach((person) => {
+      person.rooms_adjudicated = 0;
+      person.feedback = [];
+    });
+
+    roomAdjudicators.forEach((ra) => {
+      people[keyOf[ra.participant_id]].rooms_adjudicated += 1;
+    });
+    feedbacks.forEach((fb) => {
+      const value = feedbackScore(fb, countingIds);
+      if (value !== null) people[keyOf[fb.adjudicator_id]].feedback.push(value);
+    });
+
+    const data = Object.values(people).map(({ feedback, ...rest }) => {
+      const votes = base === null ? feedback : [base, ...feedback];
+      const avg_feedback =
+        votes.length > 0
+          ? round2(votes.reduce((sum, v) => sum + v, 0) / votes.length)
+          : null;
+      return { ...rest, feedback_count: feedback.length, avg_feedback };
+    });
+
+    res.status(200).json({ status: "success", data });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
+  getOrganisationAdjudicatorStats,
   getUserStats,
   getSpeakerStats,
   getTeamStats,
