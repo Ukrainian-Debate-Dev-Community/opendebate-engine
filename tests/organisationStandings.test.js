@@ -197,6 +197,32 @@ describe("Organisation-wide standings and stats", () => {
     expect(rows[0].user_id).toBe(anna.id);
   });
 
+  test("speakers by format: only that format's rooms, only who spoke there", async () => {
+    const get = (format) =>
+      request(app)
+        .get(`/api/organisations/${orgId}/standings/speakers?format=${format}`)
+        .set("Authorization", `Bearer ${token}`);
+
+    const same = await get("BPO");
+    expect(same.statusCode).toBe(200);
+    expect(same.body.data.find((r) => r.user_id === anna.id).total_points).toBe(150);
+
+    // a format nobody debated here: nobody listed
+    await Format.create({
+      name: "Trio",
+      code: "TRIO",
+      teams_per_room: 2,
+      speakers_per_team: 3,
+      score_min: 50,
+      score_max: 100,
+    });
+    const none = await get("TRIO");
+    expect(none.statusCode).toBe(200);
+    expect(none.body.data).toEqual([]);
+
+    expect((await get("NOPE")).statusCode).toBe(400);
+  });
+
   test("adjudicators: all their feedback in one average, the base once", async () => {
     const plain = await request(app)
       .get(`/api/organisations/${orgId}/stats/adjudicators`)
