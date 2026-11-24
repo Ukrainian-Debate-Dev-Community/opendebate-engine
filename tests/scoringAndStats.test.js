@@ -620,5 +620,39 @@ describe("Scoring and Stats API Endpoints", () => {
       expect(stats.placements.first_places).toBe(1);
       expect(stats.placements.win_rate_percentage).toBe(100);
     });
+
+    it("counts only the rooms of a format given as ?format=CODE", async () => {
+      const own = await request(app)
+        .get(`/api/users/${targetUserId}/stats?format=STD`)
+        .set("Authorization", `Bearer ${randomToken}`);
+      expect(own.statusCode).toEqual(200);
+      expect(own.body.data.overview.total_debates_ranked).toBe(1);
+      expect(own.body.data.placements.first_places).toBe(1);
+
+      await Format.create({
+        name: "Elsewhere",
+        code: "ELSE",
+        teams_per_room: 2,
+        speakers_per_team: 3,
+        score_min: 50,
+        score_max: 100,
+      });
+      const other = await request(app)
+        .get(`/api/users/${targetUserId}/stats?format=ELSE`)
+        .set("Authorization", `Bearer ${randomToken}`);
+      expect(other.statusCode).toEqual(200);
+      expect(other.body.data.overview).toMatchObject({
+        total_ballots_received: 0,
+        total_debates_ranked: 0,
+      });
+      expect(other.body.data.placements.win_rate_percentage).toBe(0);
+    });
+
+    it("refuses an unknown format code", async () => {
+      const res = await request(app)
+        .get(`/api/users/${targetUserId}/stats?format=NOPE`)
+        .set("Authorization", `Bearer ${randomToken}`);
+      expect(res.statusCode).toEqual(400);
+    });
   });
 });

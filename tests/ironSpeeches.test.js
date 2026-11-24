@@ -212,4 +212,70 @@ describe("Iron speeches", () => {
     expect(standings.find((s) => s.id === pairA).total_points).toEqual(70);
     expect(standings.find((s) => s.id === pairB).total_points).toEqual(0);
   });
+
+  // a three-seat format (Australs): one person can hold all three seats
+  it("with three seats, one speech counts and the rest are iron", async () => {
+    const trio = await Format.create({
+      name: "Trio",
+      code: "TRIO3",
+      teams_per_room: 2,
+      speakers_per_team: 3,
+      score_min: 50,
+      score_max: 100,
+    });
+    const [x1, y1, y2, y3, judge] = await EventParticipant.bulkCreate([
+      { event_id: eventId, display_name: "Solo", role: "speaker" },
+      { event_id: eventId, display_name: "Y1", role: "speaker" },
+      { event_id: eventId, display_name: "Y2", role: "speaker" },
+      { event_id: eventId, display_name: "Y3", role: "speaker" },
+      { event_id: eventId, display_name: "Trio judge", role: "adjudicator" },
+    ]);
+    const round = await Round.create({ event_id: eventId, name: "Round 2", sequence: 2 });
+    const room = await Room.create({ round_id: round.id, format_id: trio.id, status: "pending" });
+    const solo = await Team.create({ event_id: eventId, name: "Solo" });
+    const full = await Team.create({ event_id: eventId, name: "Full" });
+    await TeamMember.bulkCreate([
+      { team_id: solo.id, participant_id: x1.id },
+      ...[y1, y2, y3].map((y) => ({ team_id: full.id, participant_id: y.id })),
+    ]);
+    const rtSolo = await RoomTeam.create({ room_id: room.id, team_id: solo.id, position: 1 });
+    const rtFull = await RoomTeam.create({ room_id: room.id, team_id: full.id, position: 2 });
+    const soloSlots = await RoomSpeaker.bulkCreate(
+      [0, 1, 2].map(() => ({ room_team_id: rtSolo.id, participant_id: x1.id })),
+    );
+    const fullSlots = await RoomSpeaker.bulkCreate(
+      [y1, y2, y3].map((y) => ({ room_team_id: rtFull.id, participant_id: y.id })),
+    );
+    await RoomAdjudicator.create({ room_id: room.id, participant_id: judge.id, role: "chair" });
+
+    const send = (mark) =>
+      request(app)
+        .post(`/api/rooms/${room.id}/scores`)
+        .set("Authorization", `Bearer ${ownerToken}`)
+        .send({
+          teamRankings: [
+            { room_team_id: rtSolo.id, rank: 1 },
+            { room_team_id: rtFull.id, rank: 2 },
+          ],
+          speakerScores: [
+            ...soloSlots.map((slot, i) => ({ room_speaker_id: slot.id, score: 80 - i, ...mark(i) })),
+            ...fullSlots.map((slot) => ({ room_speaker_id: slot.id, score: 70 })),
+          ],
+        });
+
+    // unmarked: the first seat counts, the other two are iron
+    expect((await send(() => ({}))).statusCode).toEqual(200);
+    await Promise.all(soloSlots.map((s) => s.reload()));
+    expect(soloSlots.map((s) => s.is_iron)).toEqual([false, true, true]);
+
+    // two marked: the third counts
+    expect((await send((i) => (i < 2 ? { is_iron: true } : {}))).statusCode).toEqual(200);
+    await Promise.all(soloSlots.map((s) => s.reload()));
+    expect(soloSlots.map((s) => s.is_iron)).toEqual([true, true, false]);
+
+    // all three marked: none would count
+    const none = await send(() => ({ is_iron: true }));
+    expect(none.statusCode).toEqual(400);
+    expect(none.body.message).toMatch(/leave one unmarked/);
+  });
 });

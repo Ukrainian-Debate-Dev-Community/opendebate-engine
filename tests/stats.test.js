@@ -370,6 +370,7 @@ describe("Statistics API Endpoints", () => {
         name: "Team A",
         total_speaker_points: 311,
         first_places: 2,
+        last_places: 0,
         fourth_places: 0,
       });
       // the judging room's stale rank-1 must not count for Team B
@@ -381,6 +382,8 @@ describe("Statistics API Endpoints", () => {
       expect(byId[teamIds.D]).toMatchObject({
         total_speaker_points: 266,
         first_places: 0,
+        // last in a four-team room: the same as fourth
+        last_places: 2,
         fourth_places: 2,
       });
     });
@@ -461,6 +464,7 @@ describe("Statistics API Endpoints", () => {
       expect(res.body.data).toEqual({
         total_sessions: 2,
         avg_winner_speaker_points: 155.5, // (151 + 160) / 2
+        avg_last_place_speaker_points: 133, // BP rooms: last is fourth
         avg_fourth_place_speaker_points: 133, // (145 + 121) / 2
       });
     });
