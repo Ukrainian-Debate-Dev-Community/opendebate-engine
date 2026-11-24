@@ -4,7 +4,10 @@ const {
   EventParticipant,
   RoomSpeaker,
   Score,
+  Room,
+  Format,
 } = require("../models");
+const AppError = require("../utils/AppError");
 const { hasEventPrivilege } = require("../middleware/authMiddleware");
 const { getEventRooms } = require("../utils/finalRooms");
 const {
@@ -283,9 +286,16 @@ const getCalculatedSpeakerStandings = async (req, res, next) => {
 // user account (a guest: per participant, never merged by name), counted
 // like the per-event calculated speaker standings: raw points of ranked
 // slots, an iron-person's second speech and swing slots left out.
+// ?format=CODE counts only the rooms of that format and lists only the
+// people who spoke in them (formats never mix in one table).
 const getOrganisationSpeakerStandings = async (req, res, next) => {
   try {
     const { organisationId } = req.params;
+    let format = null;
+    if (req.query.format) {
+      format = await Format.findOne({ where: { code: String(req.query.format) } });
+      if (!format) throw new AppError(`Unknown format '${req.query.format}'.`, 400);
+    }
     const events = await getCompletedEvents(organisationId);
     const eventIds = events.map((e) => e.id);
     if (eventIds.length === 0) {
@@ -305,7 +315,19 @@ const getOrganisationSpeakerStandings = async (req, res, next) => {
       keyOf[s.id] = personKey(s);
     });
 
-    const rooms = await getVisibleRooms(req.user, organisationId, eventIds);
+    let rooms = await getVisibleRooms(req.user, organisationId, eventIds);
+    if (format) {
+      const inFormat = new Set(
+        (
+          await Room.findAll({
+            where: { id: rooms.map((r) => r.id), format_id: format.id },
+            attributes: ["id"],
+            raw: true,
+          })
+        ).map((r) => r.id),
+      );
+      rooms = rooms.filter((r) => inFormat.has(r.id));
+    }
     const roomTeams = await RoomTeam.findAll({
       where: { room_id: rooms.map((r) => r.id) },
       attributes: ["id", "rank", "team_id"],
@@ -350,6 +372,7 @@ const getOrganisationSpeakerStandings = async (req, res, next) => {
     });
 
     const data = Object.values(people)
+      .filter((p) => !format || p.speeches > 0)
       .map((p) => {
         p.total_points = parseFloat(p.total_points.toFixed(2));
         p.average_score =

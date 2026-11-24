@@ -384,9 +384,12 @@ paths:
         `speeches`, best total first. Hidden rounds count only where the
         caller may see them (admin, an owner of the organisation, the
         event's organiser). An organisation without completed events
-        gives an empty list.
+        gives an empty list. `format` (a format's code, e.g. BP or AUS)
+        counts only the rooms of that format and lists only the people who
+        spoke in them; an unknown code is a 400.
       parameters:
         - $ref: "#/components/parameters/organisationId"
+        - { name: format, in: query, required: false, schema: { type: string } }
       responses:
         "200": { $ref: "#/components/responses/Success" }
         "401": { $ref: "#/components/responses/Unauthorized" }
