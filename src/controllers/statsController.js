@@ -13,6 +13,7 @@ const {
   Room,
   RoomTeam,
   RoomAdjudicator,
+  Format,
   sequelize,
 } = require("../models");
 const { Op } = require("sequelize");
@@ -25,6 +26,21 @@ const {
   personKey,
   personRows,
 } = require("../utils/organisationScope");
+
+// the number of teams in each room: a team placed at that rank came last
+const teamCounts = async (roomIds) => {
+  const rows = await RoomTeam.findAll({
+    where: { room_id: roomIds },
+    attributes: ["room_id", [sequelize.fn("COUNT", sequelize.col("id")), "teams"]],
+    group: ["room_id"],
+    raw: true,
+  });
+  const counts = Object.create(null);
+  rows.forEach((r) => {
+    counts[r.room_id] = parseInt(r.teams, 10);
+  });
+  return counts;
+};
 
 const getUserStats = async (req, res, next) => {
   try {
@@ -81,10 +97,28 @@ const getUserStats = async (req, res, next) => {
       hiddenRoomTeamIds = hiddenRoomTeams.map((rt) => rt.id);
     }
 
+    // ?format=CODE: only the rooms of that format (BP points and a
+    // two-team format's wins never mix in one figure)
+    const roomTeamClause = {};
+    if (hiddenRoomTeamIds.length > 0) roomTeamClause[Op.notIn] = hiddenRoomTeamIds;
+    if (req.query.format) {
+      const format = await Format.findOne({ where: { code: String(req.query.format) } });
+      if (!format) throw new AppError(`Unknown format '${req.query.format}'.`, 400);
+      const formatRooms = await Room.findAll({
+        where: { format_id: format.id },
+        attributes: ["id"],
+        raw: true,
+      });
+      const formatRoomTeams = await RoomTeam.findAll({
+        where: { room_id: formatRooms.map((r) => r.id) },
+        attributes: ["id"],
+        raw: true,
+      });
+      roomTeamClause[Op.in] = formatRoomTeams.map((rt) => rt.id);
+    }
+
     const exclusionClause =
-      hiddenRoomTeamIds.length > 0
-        ? { room_team_id: { [Op.notIn]: hiddenRoomTeamIds } }
-        : {};
+      Reflect.ownKeys(roomTeamClause).length > 0 ? { room_team_id: roomTeamClause } : {};
 
     const scoreStats = await Score.findAll({
       include: [
@@ -286,8 +320,9 @@ const getTeamStats = async (req, res, next) => {
 
     const roomTeams = await RoomTeam.findAll({
       where: { room_id: roomIds, team_id: teams.map((t) => t.id) },
-      attributes: ["id", "team_id", "rank"],
+      attributes: ["id", "team_id", "rank", "room_id"],
     });
+    const teamsInRoom = await teamCounts(roomIds);
     const rtToTeam = Object.create(null);
     roomTeams.forEach((rt) => {
       rtToTeam[rt.id] = rt.team_id;
@@ -306,6 +341,9 @@ const getTeamStats = async (req, res, next) => {
         name: t.name,
         total_speaker_points: 0,
         first_places: 0,
+        // last in its room, whatever the format (4th in BP, 2nd in a
+        // two-team format); fourth_places counts BP's rank 4 only
+        last_places: 0,
         fourth_places: 0,
       };
     });
@@ -314,6 +352,7 @@ const getTeamStats = async (req, res, next) => {
       const teamStats = stats[rt.team_id];
       if (!teamStats || rt.rank === null) return;
       if (rt.rank === 1) teamStats.first_places += 1;
+      if (rt.rank === teamsInRoom[rt.room_id]) teamStats.last_places += 1;
       if (rt.rank === 4) teamStats.fourth_places += 1;
     });
 
@@ -421,8 +460,9 @@ const getAdjudicatorStats = async (req, res, next) => {
 
 // GET /api/organisations/:organisationId/stats
 // Averages are per final room of the organisation's completed events:
-// the winner (rank 1) and fourth-place (rank 4) team's summed speaker
-// points, averaged across those rooms; null when no room qualifies.
+// the winner (rank 1), the last-placed (the room's lowest rank, in any
+// format) and BP's fourth-place (rank 4) team's summed speaker points,
+// averaged across those rooms; null when no room qualifies.
 const getOrganisationStats = async (req, res, next) => {
   try {
     const { organisationId } = req.params;
@@ -443,15 +483,18 @@ const getOrganisationStats = async (req, res, next) => {
 
     const roomTeams = await RoomTeam.findAll({
       where: { room_id: roomIds },
-      attributes: ["id", "rank"],
+      attributes: ["id", "rank", "room_id"],
     });
+    const teamsInRoom = await teamCounts(roomIds);
     const rankedTeamIds = {
       1: new Set(),
       4: new Set(),
+      last: new Set(),
     };
     roomTeams.forEach((rt) => {
       if (rt.rank === 1) rankedTeamIds[1].add(rt.id);
       if (rt.rank === 4) rankedTeamIds[4].add(rt.id);
+      if (rt.rank !== null && rt.rank === teamsInRoom[rt.room_id]) rankedTeamIds.last.add(rt.id);
     });
 
     const roomSpeakers = await RoomSpeaker.findAll({
@@ -482,6 +525,7 @@ const getOrganisationStats = async (req, res, next) => {
       data: {
         total_sessions: completedEvents.length,
         avg_winner_speaker_points: averageFor(1),
+        avg_last_place_speaker_points: averageFor("last"),
         avg_fourth_place_speaker_points: averageFor(4),
       },
     });

@@ -21,11 +21,12 @@ const submitScores = async (req, res, next) => {
     /* Expected Payload Format:
       teamRankings: [ { room_team_id: 1, rank: 1 }, { room_team_id: 2, rank: 2 }, ... ]
       speakerScores: [ { room_speaker_id: 1, score: 70 }, { room_speaker_id: 2, score: 71, is_iron: true }, ... ]
-      is_iron is optional and only for one of an iron-person's two speeches;
-      unmarked, the later of the two is the iron speech.
+      is_iron is optional and only for an iron-person's speeches, all but
+      one of them; unmarked, their earliest slot counts and the later
+      ones are iron.
       participant_id is optional: the team member who actually gave that
       speech when it differs from the draw (a teammate who did not show);
-      a member giving both speeches is an iron-person.
+      a member giving more than one speech is an iron-person.
     */
 
     if (!Array.isArray(teamRankings) || teamRankings.length === 0) {
@@ -213,8 +214,10 @@ const submitScores = async (req, res, next) => {
     }
 
     // iron flags: within a team, a speech can be marked only when its
-    // speaker holds both slots, and only one of the two; with none
-    // marked, the later slot is the iron speech
+    // speaker holds more than one slot. Of an iron-person's speeches one
+    // counts for them, the rest are iron: the ballot may mark all but
+    // one; the earliest unmarked slot is the one that counts (so with
+    // two slots and none marked, the later is the iron speech)
     const marked = new Set(
       speakerScores.filter((sp) => sp.is_iron === true).map((sp) => sp.room_speaker_id),
     );
@@ -232,20 +235,25 @@ const submitScores = async (req, res, next) => {
           );
         }
       }
-      for (const pair of byParticipant.values()) {
-        if (pair.length < 2) {
-          pair.forEach((s) => {
+      for (const slots of byParticipant.values()) {
+        if (slots.length < 2) {
+          slots.forEach((s) => {
             s.is_iron = false;
           });
           continue;
         }
-        const flagged = pair.filter((s) => marked.has(s.id));
-        if (flagged.length > 1) {
-          throw new AppError("Only one of an iron-person's speeches can be marked iron.", 400);
+        const unmarked = slots.filter((s) => !marked.has(s.id));
+        if (unmarked.length === 0) {
+          throw new AppError(
+            slots.length === 2
+              ? "Only one of an iron-person's speeches can be marked iron."
+              : "One of an iron-person's speeches must count: leave one unmarked.",
+            400,
+          );
         }
-        const iron = flagged[0] || pair.reduce((a, b) => (b.id > a.id ? b : a));
-        pair.forEach((s) => {
-          s.is_iron = s.id === iron.id;
+        const counted = unmarked.reduce((a, b) => (b.id < a.id ? b : a));
+        slots.forEach((s) => {
+          s.is_iron = s.id !== counted.id;
         });
       }
       for (const speaker of speakers) await speaker.save({ transaction });

@@ -150,9 +150,12 @@ paths:
       summary: Aggregated speaker statistics for a user (visible rounds only)
       description: >
         `data` is null (with a message) for an existing user who never
-        spoke in an event; an unknown user is a 404.
+        spoke in an event; an unknown user is a 404. `format` (a format's
+        code, e.g. BP or AUS) counts only the rooms of that format; an
+        unknown code is a 400.
       parameters:
         - { name: id, in: path, required: true, schema: { type: integer } }
+        - { name: format, in: query, required: false, schema: { type: string } }
       responses:
         "200":
           description: The user's speaker statistics, or null
@@ -354,9 +357,11 @@ paths:
       summary: Organisation-level statistics over completed events
       description: >
         `total_sessions` counts the organisation's completed events.
-        `avg_winner_speaker_points` / `avg_fourth_place_speaker_points`
-        average the summed speaker points of the rank-1 / rank-4 team per
-        final room across those events (2 d.p., null when no room qualifies).
+        `avg_winner_speaker_points` / `avg_last_place_speaker_points` /
+        `avg_fourth_place_speaker_points` average the summed speaker points
+        of the rank-1 / last-placed (the room's lowest rank, any format) /
+        rank-4 (British Parliamentary only) team per final room across those
+        events (2 d.p., null when no room qualifies).
       parameters:
         - $ref: "#/components/parameters/organisationId"
       responses:
@@ -827,7 +832,8 @@ paths:
       description: >
         Array of `{ id, name, total_points }`, highest first. A team earns
         N - rank points per ranked room, N being the teams in that room
-        (3/2/1/0 in British Parliamentary). Swing teams count toward N but
+        (3/2/1/0 in British Parliamentary, 1/0 in a two-team format such
+        as Australs). Swing teams count toward N but
         are not listed.
       parameters:
         - $ref: "#/components/parameters/eventId"
@@ -879,10 +885,11 @@ paths:
   /events/{eventId}/stats/teams:
     get:
       tags: [standings]
-      summary: Team statistics (summed speaker points, firsts and fourths)
+      summary: Team statistics (summed speaker points, firsts and lasts)
       description: >
         Per team: `total_speaker_points` (sum of the team's speaker scores),
-        `first_places` and `fourth_places` (count of rank-1 / rank-4 results).
+        `first_places`, `last_places` (the room's lowest rank, any format)
+        and `fourth_places` (rank 4, British Parliamentary only).
       parameters:
         - $ref: "#/components/parameters/eventId"
       responses:
@@ -1694,11 +1701,11 @@ paths:
         On success the room status becomes `completed`. A `completed` room
         accepts resubmission as an atomic replace of the previous ballot;
         `confirmed` and `void` rooms reject submission. An iron-person (one
-        speaker in both of a team's slots) gives two speeches: both count
-        for the team, one of them (`is_iron`, by default the later slot)
-        stays out of the speaker standings and stats. Marking a speech that
-        is not an iron's, or both of an iron's, is a 400. The response
-        carries a message only.
+        speaker in more than one of a team's slots) gives several speeches:
+        all count for the team, one counts for them and the rest (`is_iron`;
+        by default every slot after their first) stay out of the speaker
+        standings and stats. Marking a speech that is not an iron's, or all
+        of an iron's, is a 400. The response carries a message only.
       parameters:
         - $ref: "#/components/parameters/roomId"
       requestBody:
@@ -1727,7 +1734,7 @@ paths:
                       score: { type: number }
                       is_iron:
                         type: boolean
-                        description: This iron-person's speech counts for the team only.
+                        description: This iron-person's speech counts for the team only (all but one of theirs may be marked).
                       participant_id:
                         type: integer
                         description: >
