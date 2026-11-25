@@ -3,6 +3,26 @@
 All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## v1.6.0 - 2026-11-25
+
+2 features, 3 chore; breaking: 0
+
+### Features
+
+- standings: organisation speaker standings by format (#119) by @merv1n34k
+- formats: Australs (2 teams x 3), stats for any team count (#118) by @merv1n34k
+
+### Other
+
+- chore(deps): bump dotenv from 18.0.8 to 18.0.9 in the prod-dependencies group (#109) by @dependabot[bot]
+- chore(deps): bump the actions group with 2 updates (#110) by @dependabot[bot]
+- chore(deps): bump actionlint action, fix body-parser and ip-address (#108) by @merv1n34k
+
+### Contributors
+
+- @merv1n34k: 3 commits
+- @dependabot[bot]: 2 commits
+
 ## v1.5.0 - 2026-10-23
 
 1 feature; breaking: 0
